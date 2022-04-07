@@ -156,7 +156,7 @@ lock_create(const char *name)
 
 	HANGMAN_LOCKABLEINIT(&lock->lk_hangman, lock->lk_name);
 
-	/*	cfve: 
+	/*	vecf: 
 	// ASST1 - add stuff here as needed
 	-initialize spinlock 
 	-initialize wchan
@@ -180,14 +180,17 @@ lock_create(const char *name)
 void
 lock_destroy(struct lock *lock)
 {
-	KASSERT(lock != NULL);
-
-	/*	cfve: 
+	/*	vecf: 
 	// add stuff here as needed
+	-lock must not be held, panic otherwise.
 	-clean up spinlock 	(expects `struct spinlock`).
 	-clean up wchan 	(expects `struct *wchan`).
 				wchan_destroy asserts if anyone is waiting on wchan.
 	*/
+
+	KASSERT(lock != NULL);
+
+	KASSERT(lock_do_i_hold(lock)==false); 
 
 	spinlock_cleanup(&lock->lock_lock);
 	wchan_destroy(lock->lock_wchan);
@@ -199,7 +202,7 @@ lock_destroy(struct lock *lock)
 void
 lock_acquire(struct lock *lock)
 {
-	/*	cfve: 
+	/*	vecf: 
 	// ASST1 - Write this
 	- get atomic access to lock
 	- if held, sleep until notified
@@ -231,10 +234,11 @@ lock_acquire(struct lock *lock)
 void
 lock_release(struct lock *lock)
 { 
-	/*	cfve:
+	/*	vecf:
 	//ASST1 - write this
 	- get atomic access to lock
 	- release the lock
+	- only holding thread may release: panic otherwise.
 	- notify one sleeping thread of realeased lock.
 	- release atomic access to the lock
 	*/
@@ -242,6 +246,8 @@ lock_release(struct lock *lock)
 	KASSERT(lock != NULL);
 
 	spinlock_acquire(&lock->lock_lock);
+
+	KASSERT(lock_do_i_hold(lock) == true);
 
 	lock->held = false;
 	lock->held_by = NULL;
@@ -259,7 +265,7 @@ lock_release(struct lock *lock)
 bool
 lock_do_i_hold(struct lock *lock)
 {
-	/*	cfve:
+	/*	vecf:
 	// ASST1 - Write this
 	- Since curthread is never NULL, 
 	- ... return true if curthread == lock->held_by.
