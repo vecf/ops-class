@@ -319,7 +319,8 @@ locktest2(int nargs, char **args) {
 	}
 
 	secprintf(SECRET, "Should panic...", "lt2");
-	lock_release(testlock); //vecf: lock released but not held. Should panic.
+	//vecf: lock released but not held. Should panic.
+	lock_release(testlock); 
 
 	/* Should not get here on success. */
 
@@ -379,7 +380,7 @@ locktestacquirer(void * junk, unsigned long num)
 	  
 	Since `testlock` has external scope (not a function local variable),
 	ie it is shared by all functions in this file (translation unit).
-	Since it marked static and has external scope, its linkeage is internal:
+	Since it's marked static and has external scope, its linkeage is internal:
 	it is not visible to other translations units in within the same program.
 
 	Informally, it is private (only visible in this file) and 
@@ -388,8 +389,11 @@ locktestacquirer(void * junk, unsigned long num)
 	kprintf_n("thread: %s, about to increase semaphore.\n",curthread->t_name);
 	V(donesem); 
 	/*	vecf: 
-	-locktest4:
-	  allow 'parent' thread to try to release lock, but it is held by child
+	-locktest4 and 5:
+	'parent' thread releases lock, but it is held by this thread.
+	Once this function returns, this thread gets cleaned up and no other 
+	thread in the system will be able to release the lock without raising an
+	exception.
 	  */
 	kprintf_n("thread: %s, about to return.\n",curthread->t_name);
 	return;
@@ -428,8 +432,11 @@ locktest4(int nargs, char **args) {
 
 	Question: 
 	We know thread_fork returns 0 upon success and a different number
-	otherwise, but where does locktestacquirer return to once done?
-	We'll first need to learn more about threads.
+	otherwise, but where does locktestacquirer() return to once done?
+	We'll first need to learn more about threads: once the entrypoint
+	function returns, thread_exit() is called which turns the thread
+	into a zombie and eventually gets it cleaned up the kernel. This
+	is very different from the control flow of traditional fork.
 	*/
 	
 	if (result) {
@@ -444,9 +451,9 @@ locktest4(int nargs, char **args) {
 
 	secprintf(SECRET, "Should panic...", "lt4");
 	/*	vecf: 
-	released from 'parent' thread, but (could be?) 
-	held by newly created thread. Depending on where locktestacquirer
-	returns to...
+	Lock released from 'parent' thread, but 
+	held by newly created thread. The new thread returns and gets cleaned
+	up and along with it goes the ability to release the lock.
 	*/
 	kprintf_n("thread: %s, about to release lock.\n",curthread->t_name);
 	lock_release(testlock); 
@@ -491,8 +498,8 @@ locktest5(int nargs, char **args) {
 	P(donesem);
 	secprintf(SECRET, "Should panic...", "lt5");
 	kprintf_n("thread: %s, about to assert.\n",curthread->t_name);
-	random_yielder(4);
-	KASSERT(lock_do_i_hold(testlock)); //vecf: lock not held.
+	//vecf: lock not held by this thread.
+	KASSERT(lock_do_i_hold(testlock)); 
 
   /* Should not get here on success. */
 
