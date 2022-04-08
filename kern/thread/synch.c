@@ -205,10 +205,11 @@ lock_acquire(struct lock *lock)
 	/*	vecf: 
 	// ASST1 - Write this
 	- get atomic access to lock
-	- if held, sleep until notified
+	- if already held, sleep until notified
 	- if not held, take lock
 	- release atomic access
 	(basically imitate semaphore without counter)
+	TODO avoid duplicate deadlocking calls to acquire
 	*/
 
 	KASSERT(lock != NULL);
@@ -220,6 +221,8 @@ lock_acquire(struct lock *lock)
 	HANGMAN_WAIT(&curthread->t_hangman, &lock->lk_hangman);
 
 	while (lock->held == true) {
+		KASSERT(lock_do_i_hold(lock)==false); // TODO deadlock waiting for self 
+		// TODO kprintf("thread %s sleeping.\n",curthread->t_hangman);
 		wchan_sleep(lock->lock_wchan, &lock->lock_lock);
 	}
 	lock->held = true;		//lock not held, take it.
@@ -300,7 +303,17 @@ cv_create(const char *name)
 		return NULL;
 	}
 
+	/*	vecf:
 	// add stuff here as needed
+	*/
+
+	cv->cv_wchan = wchan_create(cv->cv_name);
+	if (cv->cv_wchan == NULL) {
+		kfree(cv->cv_name);
+		kfree(cv);
+		return NULL;
+	}
+	spinlock_init(&cv->cv_spinlock);
 
 	return cv;
 }
@@ -310,8 +323,12 @@ cv_destroy(struct cv *cv)
 {
 	KASSERT(cv != NULL);
 
-	// add stuff here as needed
+	/*	vecf:
+	// ASST1 - add stuff here as needed
+	*/
 
+	spinlock_cleanup(&cv->cv_spinlock);
+	wchan_destroy(cv->cv_wchan);
 	kfree(cv->cv_name);
 	kfree(cv);
 }
@@ -319,23 +336,55 @@ cv_destroy(struct cv *cv)
 void
 cv_wait(struct cv *cv, struct lock *lock)
 {
-	// Write this
-	(void)cv;    // suppress warning until code gets written
-	(void)lock;  // suppress warning until code gets written
+	/*	vecf:
+	// ASST1 - Write this
+	Release supplied lock, go to sleep, and, after 
+	waking up again, re-acquire the lock.
+	TODO search all ?'s, rename cv_spinlock*/
+	spinlock_acquire(&cv->cv_spinlock); //cv_wait must be atomic?
+
+	KASSERT(lock_do_i_hold(lock)==true); //current thread must hold lock
+
+	lock_release(lock);
+		//if this isn't atomic?
+		// <- here
+		//some other thread notifies on this wchan just before we sleep
+		//...sleeps forever
+	wchan_sleep(cv->cv_wchan, &cv->cv_spinlock);//spinlock released while sleeping
+		//...imagine multiple threads woken up at once
+		// <- here
+		//one wins and gets the lock.
+		//winner finishes, calls cv_signal/cv_broadcast again but that channel is
+		//empty since everyone woke up
+		//everyone is already awake and waiting on the lock
+		//if no-one notifies on lock->lock_wchan its a deadlock
+	lock_acquire(lock);
+
+	spinlock_release(&cv->cv_spinlock);
 }
 
 void
 cv_signal(struct cv *cv, struct lock *lock)
 {
-	// Write this
-	(void)cv;    // suppress warning until code gets written
-	(void)lock;  // suppress warning until code gets written
+	/*	vecf:
+	// ASST1 - Write this
+	Wake up one thread that's sleeping on this CV.
+	*/
+	spinlock_acquire(&cv->cv_spinlock); //cv_wait must be atomic?
+	KASSERT(lock_do_i_hold(lock)==true); //current thread must hold lock
+	wchan_wakeone(cv->cv_wchan, &cv->cv_spinlock);
+	spinlock_release(&cv->cv_spinlock);
 }
 
 void
 cv_broadcast(struct cv *cv, struct lock *lock)
 {
+	/*	vecf:
 	// Write this
-	(void)cv;    // suppress warning until code gets written
-	(void)lock;  // suppress warning until code gets written
+	Wake up all threads sleeping on this CV.
+	*/
+	spinlock_acquire(&cv->cv_spinlock); //cv_wait must be atomic?
+	KASSERT(lock_do_i_hold(lock)==true); //current thread must hold lock
+	wchan_wakeall(cv->cv_wchan, &cv->cv_spinlock);
+	spinlock_release(&cv->cv_spinlock);
 }

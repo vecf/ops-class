@@ -529,7 +529,11 @@ cvtestthread(void *junk, unsigned long num)
 			testval2 = 0;
 			random_yielder(4);
 			gettime(&ts1);
-			cv_wait(testcv, testlock);
+			/*	vecf: 
+			go to sleep waiting on testcv.
+			when woken up, must hold testlock
+			*/
+			cv_wait(testcv, testlock); 
 			gettime(&ts2);
 			random_yielder(4);
 
@@ -556,15 +560,24 @@ cvtestthread(void *junk, unsigned long num)
 		for (j=0; j<3000; j++);
 
 		random_yielder(4);
+		/*	vecf:
+		notify all other threads waiting on testcv.
+		*/
 		cv_broadcast(testcv, testlock);
 		random_yielder(4);
 		failif((testval1 != testval2));
 
 		kprintf_n("Thread %lu\n", testval2);
 		testval1 = (testval1 + NTHREADS - 1) % NTHREADS;
+		/*	vecf:
+		release testlock
+		*/
 		lock_release(testlock);
 	}
-	V(donesem);
+	/*	vecf:
+	Allow another thread to run the test?
+	*/
+	V(donesem); 
 }
 
 int
@@ -577,6 +590,10 @@ cvtest(int nargs, char **args)
 
 	kprintf_n("Starting cvt1...\n");
 	for (i=0; i<CREATELOOPS; i++) {
+		/*	vecf:
+		create a lock, cv and semaphore multiple times.
+		destroy them, except on the last iteration.
+		*/
 		kprintf_t(".");
 		testlock = lock_create("testlock");
 		if (testlock == NULL) {
@@ -601,6 +618,10 @@ cvtest(int nargs, char **args)
 
 	testval1 = NTHREADS-1;
 	for (i=0; i<NTHREADS; i++) {
+		/*	vecf:
+		set testval1 to NTHREADS - 1
+		create NTHREADS running cvtestthread.
+		*/
 		kprintf_t(".");
 		result = thread_fork("cvt1", NULL, cvtestthread, NULL, (long unsigned) i);
 		if (result) {
@@ -609,6 +630,9 @@ cvtest(int nargs, char **args)
 	}
 	for (i=0; i<NTHREADS; i++) {
 		kprintf_t(".");
+		/*	vecf:
+		All created threads wait on donesem to start running.
+		*/
 		P(donesem);
 	}
 
