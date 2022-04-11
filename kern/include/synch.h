@@ -88,7 +88,6 @@ struct lock {
 
 	struct spinlock lock_lock;
 	struct wchan *lock_wchan;
-	volatile bool held;
 	volatile struct thread *held_by;
 };
 
@@ -132,7 +131,6 @@ struct cv {
         // (don't forget to mark things volatile as needed)
 	*/
 	struct wchan *cv_wchan;
-	struct spinlock cv_spinlock;
 };
 
 struct cv *cv_create(const char *name);
