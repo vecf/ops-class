@@ -400,3 +400,144 @@ cv_broadcast(struct cv *cv, struct lock *lock)
 	wchan_wakeall(cv->cv_wchan, &lock->lock_lock);
 	spinlock_release(&lock->lock_lock);
 }
+
+struct rwlock * rwlock_create(const char * name)
+{
+	struct rwlock * rwlock;
+
+	rwlock = kmalloc(sizeof(*rwlock));
+	if (rwlock == NULL) {
+		return NULL;
+	}
+
+	rwlock->rwlock_name = kstrdup(name);
+	if (rwlock->rwlock_name == NULL) {
+		kfree(rwlock);
+		return NULL;
+	}
+
+	rwlock->rwl_lock = lock_create(rwlock->rwlock_name);
+	if (rwlock->rwl_lock == NULL) {
+		kfree(rwlock->rwlock_name);
+		kfree(rwlock);
+		return NULL;
+	}
+
+	rwlock->cv_readers = cv_create(rwlock->rwlock_name);
+	if (rwlock->cv_readers == NULL) {
+		kfree(rwlock->rwl_lock);
+		kfree(rwlock->rwlock_name);
+		kfree(rwlock);
+		return NULL;
+	}
+	 
+	rwlock->cv_writers = cv_create(rwlock->rwlock_name);
+	if (rwlock->cv_writers == NULL) {
+		kfree(rwlock->cv_readers);
+		kfree(rwlock->rwl_lock);
+		kfree(rwlock->rwlock_name);
+		kfree(rwlock);
+		return NULL;
+	}
+
+	/* no one holding lock upon creation */
+	rwlock->waiting_writers = 0;
+	rwlock->running_writers = 0;
+	rwlock->waiting_readers = 0;
+	rwlock->running_readers = 0;
+
+	return rwlock;
+}
+
+void rwlock_destroy(struct rwlock *rwlock)
+{
+	lock_acquire(rwlock->rwl_lock);
+
+	//ensure no thread holding this rwlock
+	KASSERT(rwlock->waiting_writers == 0);
+	KASSERT(rwlock->running_writers == 0);
+	KASSERT(rwlock->waiting_readers == 0);
+	KASSERT(rwlock->running_readers == 0);
+
+	cv_destroy(rwlock->cv_readers);
+	cv_destroy(rwlock->cv_writers);
+	lock_release(rwlock->rwl_lock); //cv's == NULL -> no one can get rwlock
+	lock_destroy(rwlock->rwl_lock);
+
+	kfree(rwlock->rwlock_name);
+	kfree(rwlock);
+}
+
+/* TODO? A fair yet efficient way would be to place a limit on reader pool size :
+this way, all readers can potentially access the resource in parallel without affecting the wait time
+of queued writes. A fair limit in the case where there is only one process running on the machine,
+would be NPROCESSORS. */
+
+/* TODO COPY OUT DEFINES? */
+#define rwl_lock	rwlock->rwl_lock
+#define cv_readers	rwlock->cv_readers
+#define cv_writers 	rwlock->cv_writers
+#define waiting_writers rwlock->waiting_writers
+#define running_writers rwlock->running_writers
+#define waiting_readers rwlock->waiting_readers
+#define running_readers rwlock->running_readers
+
+/* 
+//TODO check that these get checked 
+KASSERT(rwlock != NULL); 
+KASSERT(cv_readers != NULL);
+KASSERT(cv_writers != NULL);
+KASSERT(rwl_lock != NULL);
+KASSERT(curthread->t_in_interrupt == false);
+*/
+
+void rwlock_acquire_read(struct rwlock *rwlock)
+{	
+	lock_acquire(rwl_lock);
+
+	if (waiting_writers != 0 || 
+			running_writers != 0){	//sleep on writers waiting or running
+		waiting_readers += 1;
+		cv_wait(cv_readers,rwl_lock);
+		waiting_readers -= 1;
+	}
+	running_readers += 1;				//readlock acquired on wakeup|immediate
+	lock_release(rwl_lock);
+}
+
+void rwlock_acquire_write(struct rwlock *rwlock)
+{	
+	lock_acquire(rwl_lock);
+	if (running_readers != 0 
+			|| running_writers != 0) {	//sleep on reading or writing
+		waiting_writers += 1;
+		cv_wait(cv_writers, rwl_lock);
+		waiting_writers -= 1;
+	}
+	running_writers += 1;				//writelock acquired on wakeup|immediate
+	KASSERT(running_writers == 1);			//one writer at a time
+	lock_release(rwl_lock);
+}
+
+void rwlock_release_write(struct rwlock *rwlock)
+{	
+	lock_acquire(rwl_lock);
+	running_writers -= 1;
+	KASSERT(running_writers == 0);		//lock not released yet, no writers can be running
+	if (waiting_readers != 0) {
+		cv_broadcast(cv_readers, rwl_lock);
+	} else if (waiting_writers != 0) {
+		cv_signal(cv_writers, rwl_lock);
+	}
+	lock_release(rwl_lock);
+}
+
+void rwlock_release_read(struct rwlock *rwlock)
+{
+	lock_acquire(rwl_lock);
+	running_readers -= 1;
+	if (running_readers == 0) { // && waiting_writers != 0) {
+		cv_signal(cv_writers, rwl_lock); //could have waiting readers at this point
+	}
+	lock_release(rwl_lock);
+}

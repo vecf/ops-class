@@ -165,8 +165,13 @@ void cv_broadcast(struct cv *cv, struct lock *lock);
 
 struct rwlock {
         char *rwlock_name;
-        // add what you need here
-        // (don't forget to mark things volatile as needed)
+	struct lock *rwl_lock;
+	struct cv *cv_readers;
+	struct cv *cv_writers;
+	volatile unsigned int waiting_writers;
+	volatile unsigned int running_writers;
+	volatile unsigned int waiting_readers;
+	volatile unsigned int running_readers;
 };
 
 struct rwlock * rwlock_create(const char *);
