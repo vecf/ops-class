@@ -40,7 +40,7 @@
 #include <current.h>
 #include <synch.h>
 #include <test.h>	/* usefull printing during tests */
-#include <cpu.h> 	/* rwlock use num_cpus */
+#include <cpu.h> 	/* rwlock uses num_cpus */
 
 ////////////////////////////////////////////////////////////
 //
@@ -403,81 +403,69 @@ cv_broadcast(struct cv *cv, struct lock *lock)
 	spinlock_release(&lock->lock_lock);
 }
 
+////////////////////////////////////////////////////////////
+//
+// RWLOCK
+
 struct rwlock * rwlock_create(const char * name)
 {
-	struct rwlock * rwlock;
+	struct rwlock *rwl;
 
-	rwlock = kmalloc(sizeof(*rwlock));
-	if (rwlock == NULL) {
+	rwl = kmalloc(sizeof(*rwl));
+	if (rwl == NULL) {
 		return NULL;
 	}
 
-	rwlock->rwlock_name = kstrdup(name);
-	if (rwlock->rwlock_name == NULL) {
-		kfree(rwlock);
+	rwl->rwlock_name = kstrdup(name);
+	if (rwl->rwlock_name == NULL) {
+		kfree(rwl);
 		return NULL;
 	}
 
-	rwlock->rwl_lock = lock_create(rwlock->rwlock_name);
-	if (rwlock->rwl_lock == NULL) {
-		kfree(rwlock->rwlock_name);
-		kfree(rwlock);
-		return NULL;
-	}
-
-	rwlock->cv_readers = cv_create(rwlock->rwlock_name);
-	if (rwlock->cv_readers == NULL) {
-		kfree(rwlock->rwl_lock);
-		kfree(rwlock->rwlock_name);
-		kfree(rwlock);
+	rwl->readers = wchan_create(rwl->rwlock_name);
+	if (rwl->readers == NULL) {
+		kfree(rwl->rwlock_name);
+		kfree(rwl);
 		return NULL;
 	}
 	 
-	rwlock->cv_writers = cv_create(rwlock->rwlock_name);
-	if (rwlock->cv_writers == NULL) {
-		kfree(rwlock->cv_readers);
-		kfree(rwlock->rwl_lock);
-		kfree(rwlock->rwlock_name);
-		kfree(rwlock);
+	rwl->writers = wchan_create(rwl->rwlock_name);
+	if (rwl->writers == NULL) {
+		kfree(rwl->readers);
+		kfree(rwl->rwlock_name);
+		kfree(rwl);
 		return NULL;
 	}
 
 	/* no one holding lock upon creation */
-	rwlock->waiting_writers = 0;
-	rwlock->running_writers = 0;
-	rwlock->waiting_readers = 0;
-	rwlock->running_readers = 0;
+	spinlock_init(&rwl->lock);
 
-	return rwlock;
+	rwl->writes_wait = 0;
+	rwl->writes_run = 0;
+	rwl->reads_wait = 0;
+	rwl->reads_run = 0;
+
+	return rwl;
 }
 
-void rwlock_destroy(struct rwlock *rwlock)
+void rwlock_destroy(struct rwlock *rwl)
 {
-	lock_acquire(rwlock->rwl_lock);
+	KASSERT(rwl != NULL);
 
 	//ensure no thread holding this rwlock
-	KASSERT(rwlock->waiting_writers == 0);
-	KASSERT(rwlock->running_writers == 0);
-	KASSERT(rwlock->waiting_readers == 0);
-	KASSERT(rwlock->running_readers == 0);
+	KASSERT(rwl->writes_wait == 0);
+	KASSERT(rwl->writes_run == 0);
+	KASSERT(rwl->reads_wait == 0);
+	KASSERT(rwl->reads_run == 0);
 
-	cv_destroy(rwlock->cv_readers);
-	cv_destroy(rwlock->cv_writers);
-	lock_release(rwlock->rwl_lock); //cv's == NULL -> no one can get rwlock
-	lock_destroy(rwlock->rwl_lock);
+	spinlock_cleanup(&rwl->lock);
 
-	kfree(rwlock->rwlock_name);
-	kfree(rwlock);
+	wchan_destroy(rwl->readers);
+	wchan_destroy(rwl->writers);
+
+	kfree(rwl->rwlock_name);
+	kfree(rwl);
 }
-
-/* TODO COPY OUT DEFINES? */
-#define rwl_lock	rwlock->rwl_lock
-#define cv_readers	rwlock->cv_readers
-#define cv_writers 	rwlock->cv_writers
-#define waiting_writers rwlock->waiting_writers
-#define running_writers rwlock->running_writers
-#define waiting_readers rwlock->waiting_readers
-#define running_readers rwlock->running_readers
 
 /* 
 The main ideas behind the algorithm:
@@ -491,102 +479,100 @@ The main ideas behind the algorithm:
 -When there are only readers or only writers, readers awaken readers and writers awaken writers.
 -A limit is placed on the awoken reader pool size to be fair whilst maintaining efficiency.
 
-A discussion of awoken reader pool size:
-By limiting the awoken reader pool size, multiple readers gain access without queued write wait time.
-A fair upper limit in the case where there is only one process running on the machine is num_cpus.
-
+By limiting reader pool size, multiple readers gain access without affecting writer wait time.
 However, deciding how many readers to run at once after a write creates design tension:
-	On the one hand...
+1) On the one hand...
 Threads can run in parallel on different processors, thus
 if there are few other programs running, some processors could sit idle
 if less than num_cpu threads acquire simultaneous read locks.
-	... then again,
+2) ... then again,
 If CPU's are in use by other programs and idleness risk is low,
-its more fair to the writers to run all readers/writers roughly in arrival order.
-	... in conclusion,
+its more fair to the writers to run readers/writers roughly in arrival order.
+3) ... in conclusion,
 We assume that in general, there are other things happening on the system
 and try to get readers/writers scheduled roughly in arrival order.
-This lets the waiting reader/writer queues empty at roughly the same time,
-instead of building up a backlog of writers.
+When there are more readers than writers, this lets the waiting reader/writer queues empty at 
+roughly the same time, instead of building up a backlog of writers.
 */
 
 /* 
 //TODO check that these get checked 
-KASSERT(rwlock != NULL); 
-KASSERT(cv_readers != NULL);
-KASSERT(cv_writers != NULL);
-KASSERT(rwl_lock != NULL);
+KASSERT(rwl != NULL); 
+KASSERT(readers != NULL);
+KASSERT(writers != NULL);
+KASSERT(rwl->lock != NULL);
 KASSERT(curthread->t_in_interrupt == false);
 */
 
-void rwlock_acquire_read(struct rwlock *rwlock)
+void rwlock_acquire_read(struct rwlock *rwl)
 {	
-	lock_acquire(rwl_lock);
+	spinlock_acquire(&rwl->lock);
 
-	if (running_readers > num_cpus || 	// sleep when too many readers running
-		waiting_writers != 0 ||		// or writers are waiting
-			running_writers != 0){	// or a write is in progress
-		waiting_readers += 1;
-		cv_wait(cv_readers,rwl_lock);
-		waiting_readers -= 1;
+	if (rwl->reads_run > num_cpus || 		//sleep when too many readers running
+		rwl->writes_wait != 0 ||		//or writers are waiting
+			rwl->writes_run != 0){		//or a write is in progress
+		rwl->reads_wait += 1;
+		wchan_sleep(rwl->readers,&rwl->lock);
+		rwl->reads_wait -= 1;
 	}
-	running_readers += 1;				//readlock acquired on wakeup|immediate
+	rwl->reads_run += 1;				//readlock acquired on wakeup|immediate
 
-	KASSERT(running_writers == 0);			//no writers when reading
+	KASSERT(rwl->writes_run == 0);			//no writers when reading
 
-	lock_release(rwl_lock);
+	spinlock_release(&rwl->lock);
 }
 
-void rwlock_acquire_write(struct rwlock *rwlock)
+void rwlock_acquire_write(struct rwlock *rwl)
 {	
-	lock_acquire(rwl_lock);
-	if (running_readers != 0 
-			|| running_writers != 0) {	//sleep on read/write in progress
-		waiting_writers += 1;
-		cv_wait(cv_writers, rwl_lock);
-		waiting_writers -= 1;
+	spinlock_acquire(&rwl->lock);
+	if (rwl->reads_run != 0 
+			|| rwl->writes_run != 0) {	//sleep on read/write in progress
+		rwl->writes_wait += 1;
+		wchan_sleep(rwl->writers, &rwl->lock);
+		rwl->writes_wait -= 1;
 	}
-	running_writers += 1;				//writelock acquired on wakeup|immediate
+	rwl->writes_run += 1;				//writelock acquired on wakeup|immediate
 
-	KASSERT(running_readers == 0);			//no readers when write acquired
-	KASSERT(running_writers == 1);			//one writer at a time
+	KASSERT(rwl->reads_run == 0);			//no readers when write acquired
+	KASSERT(rwl->writes_run == 1);			//one writer at a time
 
-	lock_release(rwl_lock);
+	spinlock_release(&rwl->lock);
 }
 
-void rwlock_release_write(struct rwlock *rwlock)
+void rwlock_release_write(struct rwlock *rwl)
 {	
-	lock_acquire(rwl_lock);
-	running_writers -= 1;
-	KASSERT(running_writers == 0);		// rwl_lock held, no writers running
+	spinlock_acquire(&rwl->lock);
+	rwl->writes_run -= 1;
+	KASSERT(rwl->writes_run == 0);			//lock held, no writers running
 
-	unsigned readers_to_wake;
-	if (waiting_writers != 0)
-		readers_to_wake = waiting_readers/waiting_writers; 	//be fair
+	unsigned wake_reads;
+	if (rwl->writes_wait != 0)
+		wake_reads = rwl->reads_wait/rwl->writes_wait; 	//be fair
 	else
-		readers_to_wake = num_cpus; 				//... or maximize parallelism
+		wake_reads = num_cpus; 				//...or maximize parallelism
 
-	/* print only in tests to show fairness/parallelism tradeoff */
-	kprintf_n("\t\t\twaiting_readers:%d,waiting_writers:%d\n", waiting_readers,waiting_writers);
-	kprintf_n("\t\t\treaders_to_wake:%d\n", readers_to_wake);
+	kprintf_n("\t\t\trwl->reads_wait:%d,"
+			"rwl->writes_wait:%d\n", 		//print during tests 
+		rwl->reads_wait, rwl->writes_wait);
+	kprintf_n("\t\t\twake_reads:%d\n", wake_reads);
 
-	if (readers_to_wake != 0) { 		//wake fair/max number of readers
-		for (unsigned i = 0; i < readers_to_wake; ++i)
-			cv_signal(cv_readers, rwl_lock);
-	} else if (waiting_writers != 0) { 	//... otherwise wake next writer
-		cv_signal(cv_writers, rwl_lock);
+	if (wake_reads != 0) { 					//wake fair/max number of readers
+		for (unsigned i = 0; i < wake_reads; ++i)
+			wchan_wakeone(rwl->readers, &rwl->lock);
+	} else if (rwl->writes_wait != 0) { 			//...otherwise wake next writer
+		wchan_wakeone(rwl->writers, &rwl->lock);
 	}
-	lock_release(rwl_lock);
+	spinlock_release(&rwl->lock);
 }
 
-void rwlock_release_read(struct rwlock *rwlock)
+void rwlock_release_read(struct rwlock *rwl)
 {
-	lock_acquire(rwl_lock);
-	running_readers -= 1;
-	if (running_readers == 0 && waiting_writers != 0) { 	//batch of readers done, hand over to writer
-		cv_signal(cv_writers, rwl_lock);
-	} else if (waiting_writers == 0) {			//no waiting writers
-		cv_signal(cv_readers, rwl_lock); 		//finishing reader signals another
+	spinlock_acquire(&rwl->lock);
+	rwl->reads_run -= 1;
+	if (rwl->reads_run == 0 && rwl->writes_wait != 0) { 	//reader batch done, yield to writer
+		wchan_wakeone(rwl->writers, &rwl->lock);
+	} else if (rwl->writes_wait == 0) {			//no waiting writers
+		wchan_wakeone(rwl->readers, &rwl->lock); 		//finishing reader signals another
 	}
-	lock_release(rwl_lock);
+	spinlock_release(&rwl->lock);
 }

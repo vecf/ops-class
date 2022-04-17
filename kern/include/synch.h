@@ -165,13 +165,13 @@ void cv_broadcast(struct cv *cv, struct lock *lock);
 
 struct rwlock {
         char *rwlock_name;
-	struct lock *rwl_lock;
-	struct cv *cv_readers;
-	struct cv *cv_writers;
-	volatile unsigned int waiting_writers;
-	volatile unsigned int running_writers;
-	volatile unsigned int waiting_readers;
-	volatile unsigned int running_readers;
+	struct spinlock lock;
+	struct wchan *readers;
+	struct wchan *writers;
+	volatile unsigned int writes_wait;
+	volatile unsigned int writes_run;
+	volatile unsigned int reads_wait;
+	volatile unsigned int reads_run;
 };
 
 struct rwlock * rwlock_create(const char *);
