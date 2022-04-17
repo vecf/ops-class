@@ -349,15 +349,6 @@ cv_wait(struct cv *cv, struct lock *lock)
 	/*	vecf:
 	Release supplied lock, go to sleep, and, after 
 	waking up again, re-acquire the lock.
-	TODO 
-	-how can different channels use same spinlock?
-		-why could we not lock twice then wait?
-	-why do cv_wait etc need to be atomic?
-
-	NOTE:
-	-from recitation 2017:
-		every cv must have it's own wchan.
-		but, it uses the lock passed in.
 	-current thread must hold lock
 	*/
 
@@ -407,6 +398,21 @@ cv_broadcast(struct cv *cv, struct lock *lock)
 //
 // RWLOCK
 
+
+/*	vecf:
+The main ideas behind the algorithm:
+-Enforce exclusive access for writers, multiple access for readers. 
+-If there are no writers, readers get immediate access.
+-Readers stop getting immediate access when there are waiting writers or a write is in progress.
+-Readers pool up when they cannot run straight away, later, the pool is released all at once.
+-Threads can run in parallel on different processors, thus limiting pool
+size to to num_cpus maximizes progress.
+-For fairness, readers and writers take turns by:
+	-Writers generally release pools of readers when done.
+	-Reader pools generally release a single reader when the pool is done.
+-When there are only readers or only writers, readers awaken readers and writers awaken writers.
+*/
+
 struct rwlock * rwlock_create(const char * name)
 {
 	struct rwlock *rwl;
@@ -437,9 +443,9 @@ struct rwlock * rwlock_create(const char * name)
 		return NULL;
 	}
 
-	/* no one holding lock upon creation */
 	spinlock_init(&rwl->lock);
 
+	// no one holding lock upon creation
 	rwl->writes_wait = 0;
 	rwl->writes_run = 0;
 	rwl->reads_wait = 0;
@@ -452,7 +458,6 @@ void rwlock_destroy(struct rwlock *rwl)
 {
 	KASSERT(rwl != NULL);
 
-	//ensure no thread holding this rwlock
 	KASSERT(rwl->writes_wait == 0);
 	KASSERT(rwl->writes_run == 0);
 	KASSERT(rwl->reads_wait == 0);
@@ -467,99 +472,87 @@ void rwlock_destroy(struct rwlock *rwl)
 	kfree(rwl);
 }
 
-/* 
-The main ideas behind the algorithm:
--Enforce exclusive access for writers, multiple access for readers. 
--If there are no writers, readers get immediate access.
--Readers stop getting immediate access when there are waiting writers or a write is in progress.
--Readers pool up when they cannot run straight away, later, the pool is released all at once.
--For fairness, readers and writers take turns by:
-	-Writers generally release pools of readers when done.
-	-Reader pools generally release a single reader when the pool is done.
--When there are only readers or only writers, readers awaken readers and writers awaken writers.
--A limit is placed on the awoken reader pool size to be fair whilst maintaining efficiency.
-
-By limiting reader pool size, multiple readers gain access without affecting writer wait time.
-However, deciding how many readers to run at once after a write creates design tension:
-1) On the one hand...
-Threads can run in parallel on different processors, thus
-if there are few other programs running, some processors could sit idle
-if less than num_cpu threads acquire simultaneous read locks.
-2) ... then again,
-If CPU's are in use by other programs and idleness risk is low,
-its more fair to the writers to run readers/writers roughly in arrival order.
-3) ... in conclusion,
-We assume that in general, there are other things happening on the system
-and try to get readers/writers scheduled roughly in arrival order.
-When there are more readers than writers, this lets the waiting reader/writer queues empty at 
-roughly the same time, instead of building up a backlog of writers.
-*/
-
-/* 
-//TODO check that these get checked 
-KASSERT(rwl != NULL); 
-KASSERT(readers != NULL);
-KASSERT(writers != NULL);
-KASSERT(rwl->lock != NULL);
-KASSERT(curthread->t_in_interrupt == false);
-*/
-
 void rwlock_acquire_read(struct rwlock *rwl)
 {	
+	KASSERT(rwl != NULL); 
+
+	//no blocking in interrupt handlers
+	KASSERT(curthread->t_in_interrupt == false);	
+
 	spinlock_acquire(&rwl->lock);
 
-	if (rwl->reads_run > num_cpus || 		//sleep when too many readers running
-		rwl->writes_wait != 0 ||		//or writers are waiting
-			rwl->writes_run != 0){		//or a write is in progress
-		rwl->reads_wait += 1;
-		wchan_sleep(rwl->readers,&rwl->lock);
-		rwl->reads_wait -= 1;
-	}
-	rwl->reads_run += 1;				//readlock acquired on wakeup|immediate
+	//sleep when 
+	//1) writers are waiting... 
+	if (rwl->writes_wait != 0)
+		goto bed;
 
-	KASSERT(rwl->writes_run == 0);			//no writers when reading
+	//2) ...or too many readers running
+	//3) ...or a write is in progress
+	while (rwl->reads_run >= num_cpus ||
+			rwl->writes_run != 0){
+		//protected against spurious wakeups
+		bed:
+			rwl->reads_wait += 1;
+			wchan_sleep(rwl->readers,&rwl->lock);
+			rwl->reads_wait -= 1;
+	}
+
+	//readlock acquired on wakeup|immediate
+	rwl->reads_run += 1;
+
+	//no writers when reading
+	KASSERT(rwl->writes_run == 0);
+
+	//kprintf_n("\t\t\trunR:%d\n", rwl->reads_run);
+	KASSERT(rwl->writes_run <= num_cpus);
 
 	spinlock_release(&rwl->lock);
 }
 
 void rwlock_acquire_write(struct rwlock *rwl)
 {	
+	KASSERT(rwl != NULL); 
+
+	//no blocking in interrupt handlers
+	KASSERT(curthread->t_in_interrupt == false);
+
 	spinlock_acquire(&rwl->lock);
-	if (rwl->reads_run != 0 
-			|| rwl->writes_run != 0) {	//sleep on read/write in progress
+
+	//sleep on read/write in progress
+	while (rwl->reads_run != 0
+			|| rwl->writes_run != 0) {
+		//protected against spurious wakeups
 		rwl->writes_wait += 1;
 		wchan_sleep(rwl->writers, &rwl->lock);
 		rwl->writes_wait -= 1;
 	}
-	rwl->writes_run += 1;				//writelock acquired on wakeup|immediate
-
-	KASSERT(rwl->reads_run == 0);			//no readers when write acquired
-	KASSERT(rwl->writes_run == 1);			//one writer at a time
+	//writelock acquired on wakeup|immediate
+	rwl->writes_run += 1;
+	
+	//no readers when write acquired
+	KASSERT(rwl->reads_run == 0);	
+	//one writer at a time
+	KASSERT(rwl->writes_run == 1);
 
 	spinlock_release(&rwl->lock);
 }
 
 void rwlock_release_write(struct rwlock *rwl)
 {	
+	KASSERT(rwl != NULL); 
+
 	spinlock_acquire(&rwl->lock);
 	rwl->writes_run -= 1;
-	KASSERT(rwl->writes_run == 0);			//lock held, no writers running
 
-	unsigned wake_reads;
-	if (rwl->writes_wait != 0)
-		wake_reads = rwl->reads_wait/rwl->writes_wait; 	//be fair
-	else
-		wake_reads = num_cpus; 				//...or maximize parallelism
+	//lock held, no writers running
+	KASSERT(rwl->writes_run == 0);			
 
-	kprintf_n("\t\t\trwl->reads_wait:%d,"
-			"rwl->writes_wait:%d\n", 		//print during tests 
-		rwl->reads_wait, rwl->writes_wait);
-	kprintf_n("\t\t\twake_reads:%d\n", wake_reads);
-
-	if (wake_reads != 0) { 					//wake fair/max number of readers
-		for (unsigned i = 0; i < wake_reads; ++i)
+	if (rwl->reads_wait != 0) {
+		//wake max number of readers
+		for (unsigned i = 0; i < num_cpus; ++i)
 			wchan_wakeone(rwl->readers, &rwl->lock);
-	} else if (rwl->writes_wait != 0) { 			//...otherwise wake next writer
+	} else if (rwl->writes_wait != 0) {
+		//...otherwise wake next writer
 		wchan_wakeone(rwl->writers, &rwl->lock);
 	}
 	spinlock_release(&rwl->lock);
@@ -567,12 +560,19 @@ void rwlock_release_write(struct rwlock *rwl)
 
 void rwlock_release_read(struct rwlock *rwl)
 {
+	KASSERT(rwl != NULL); 
+
 	spinlock_acquire(&rwl->lock);
+
 	rwl->reads_run -= 1;
-	if (rwl->reads_run == 0 && rwl->writes_wait != 0) { 	//reader batch done, yield to writer
+
+	if (rwl->reads_run == 0 && rwl->writes_wait != 0) {
+		//reader batch done, yield to writer
 		wchan_wakeone(rwl->writers, &rwl->lock);
-	} else if (rwl->writes_wait == 0) {			//no waiting writers
-		wchan_wakeone(rwl->readers, &rwl->lock); 		//finishing reader signals another
+	} else if (rwl->writes_wait == 0) {
+		//finishing reader signals another
+		wchan_wakeone(rwl->readers, &rwl->lock);
 	}
+
 	spinlock_release(&rwl->lock);
 }
