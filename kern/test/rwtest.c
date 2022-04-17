@@ -143,18 +143,11 @@ int rwtest3(int nargs, char **args) {
 	(void)nargs;
 	(void)args;
 	/* 
-	test 1: do readers pool together?
-	start a writer
-	start 8 readers,
-	start 3 writers
-	... wait for 8 readers, 4 writers
-	test 2: do writers wait for readers?
-	start 10 readers
-	start 3 writers
-	start 1 reader
-	test 3: do readers jump to queue front?
-	8 writers
-	8 readers
+	TODO only readers,
+	check that 
+	-readers signal correctly when done
+	-all readers finish eventually
+	-num_cpu readers read at a time
 	*/
 
 	kprintf_n("rwt3 unimplemented\n");

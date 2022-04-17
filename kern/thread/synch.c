@@ -39,6 +39,8 @@
 #include <thread.h>
 #include <current.h>
 #include <synch.h>
+#include <test.h>	/* usefull printing during tests */
+#include <cpu.h> 	/* rwlock use num_cpus */
 
 ////////////////////////////////////////////////////////////
 //
@@ -193,8 +195,8 @@ lock_destroy(struct lock *lock)
 
 	spinlock_cleanup(&lock->lock_lock);
 	wchan_destroy(lock->lock_wchan);
-	//TODO
-	//lock->held_by //though you should not kill the thread!!!
+
+	//do not free lock->held_by. That kills the thread!
 
 	kfree(lock->lk_name);
 	kfree(lock);
@@ -468,11 +470,6 @@ void rwlock_destroy(struct rwlock *rwlock)
 	kfree(rwlock);
 }
 
-/* TODO? A fair yet efficient way would be to place a limit on reader pool size :
-this way, all readers can potentially access the resource in parallel without affecting the wait time
-of queued writes. A fair limit in the case where there is only one process running on the machine,
-would be NPROCESSORS. */
-
 /* TODO COPY OUT DEFINES? */
 #define rwl_lock	rwlock->rwl_lock
 #define cv_readers	rwlock->cv_readers
@@ -481,6 +478,37 @@ would be NPROCESSORS. */
 #define running_writers rwlock->running_writers
 #define waiting_readers rwlock->waiting_readers
 #define running_readers rwlock->running_readers
+
+/* 
+The main ideas behind the algorithm:
+-Enforce exclusive access for writers, multiple access for readers. 
+-If there are no writers, readers get immediate access.
+-Readers stop getting immediate access when there are waiting writers or a write is in progress.
+-Readers pool up when they cannot run straight away, later, the pool is released all at once.
+-For fairness, readers and writers take turns by:
+	-Writers generally release pools of readers when done.
+	-Reader pools generally release a single reader when the pool is done.
+-When there are only readers or only writers, readers awaken readers and writers awaken writers.
+-A limit is placed on the awoken reader pool size to be fair whilst maintaining efficiency.
+
+A discussion of awoken reader pool size:
+By limiting the awoken reader pool size, multiple readers gain access without queued write wait time.
+A fair upper limit in the case where there is only one process running on the machine is num_cpus.
+
+However, deciding how many readers to run at once after a write creates design tension:
+	On the one hand...
+Threads can run in parallel on different processors, thus
+if there are few other programs running, some processors could sit idle
+if less than num_cpu threads acquire simultaneous read locks.
+	... then again,
+If CPU's are in use by other programs and idleness risk is low,
+its more fair to the writers to run all readers/writers roughly in arrival order.
+	... in conclusion,
+We assume that in general, there are other things happening on the system
+and try to get readers/writers scheduled roughly in arrival order.
+This lets the waiting reader/writer queues empty at roughly the same time,
+instead of building up a backlog of writers.
+*/
 
 /* 
 //TODO check that these get checked 
@@ -495,13 +523,17 @@ void rwlock_acquire_read(struct rwlock *rwlock)
 {	
 	lock_acquire(rwl_lock);
 
-	if (waiting_writers != 0 || 
-			running_writers != 0){	//sleep on writers waiting or running
+	if (running_readers > num_cpus || 	// sleep when too many readers running
+		waiting_writers != 0 ||		// or writers are waiting
+			running_writers != 0){	// or a write is in progress
 		waiting_readers += 1;
 		cv_wait(cv_readers,rwl_lock);
 		waiting_readers -= 1;
 	}
 	running_readers += 1;				//readlock acquired on wakeup|immediate
+
+	KASSERT(running_writers == 0);			//no writers when reading
+
 	lock_release(rwl_lock);
 }
 
@@ -509,13 +541,16 @@ void rwlock_acquire_write(struct rwlock *rwlock)
 {	
 	lock_acquire(rwl_lock);
 	if (running_readers != 0 
-			|| running_writers != 0) {	//sleep on reading or writing
+			|| running_writers != 0) {	//sleep on read/write in progress
 		waiting_writers += 1;
 		cv_wait(cv_writers, rwl_lock);
 		waiting_writers -= 1;
 	}
 	running_writers += 1;				//writelock acquired on wakeup|immediate
+
+	KASSERT(running_readers == 0);			//no readers when write acquired
 	KASSERT(running_writers == 1);			//one writer at a time
+
 	lock_release(rwl_lock);
 }
 
@@ -523,10 +558,22 @@ void rwlock_release_write(struct rwlock *rwlock)
 {	
 	lock_acquire(rwl_lock);
 	running_writers -= 1;
-	KASSERT(running_writers == 0);		//lock not released yet, no writers can be running
-	if (waiting_readers != 0) {
-		cv_broadcast(cv_readers, rwl_lock);
-	} else if (waiting_writers != 0) {
+	KASSERT(running_writers == 0);		// rwl_lock held, no writers running
+
+	unsigned readers_to_wake;
+	if (waiting_writers != 0)
+		readers_to_wake = waiting_readers/waiting_writers; 	//be fair
+	else
+		readers_to_wake = num_cpus; 				//... or maximize parallelism
+
+	/* print only in tests to show fairness/parallelism tradeoff */
+	kprintf_n("\t\t\twaiting_readers:%d,waiting_writers:%d\n", waiting_readers,waiting_writers);
+	kprintf_n("\t\t\treaders_to_wake:%d\n", readers_to_wake);
+
+	if (readers_to_wake != 0) { 		//wake fair/max number of readers
+		for (unsigned i = 0; i < readers_to_wake; ++i)
+			cv_signal(cv_readers, rwl_lock);
+	} else if (waiting_writers != 0) { 	//... otherwise wake next writer
 		cv_signal(cv_writers, rwl_lock);
 	}
 	lock_release(rwl_lock);
@@ -536,8 +583,10 @@ void rwlock_release_read(struct rwlock *rwlock)
 {
 	lock_acquire(rwl_lock);
 	running_readers -= 1;
-	if (running_readers == 0) { // && waiting_writers != 0) {
-		cv_signal(cv_writers, rwl_lock); //could have waiting readers at this point
+	if (running_readers == 0 && waiting_writers != 0) { 	//batch of readers done, hand over to writer
+		cv_signal(cv_writers, rwl_lock);
+	} else if (waiting_writers == 0) {			//no waiting writers
+		cv_signal(cv_readers, rwl_lock); 		//finishing reader signals another
 	}
 	lock_release(rwl_lock);
 }
