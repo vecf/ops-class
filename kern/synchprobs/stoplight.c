@@ -63,56 +63,123 @@
  * functions in synchprobs.c to record their progress.
  */
 
+ /*	vecf:
+The approach is simple yet effective:
+
+Each car needs access to a quadrant via a semaphore before accessing it.
+Since only one car is allowed in a quadrant at once, this semaphore's value
+is one. This avoids collisions.
+
+To keep things simple, we only let the cars move in conventional ways.
+Per thread, this limits gostraight, turnleft and turnright to acquire the 
+quadrant semaphores in the same predefined order every time.
+
+To avoid deadlocks, the intersection capacity is controlled via a semaphore.
+Given the limited ways in which the cars can move, the intersection can only
+deadlock when there are four cars in it at once. The intersection semaphore
+is therefore initialized to 3.
+*/
+
+
+
+
 #include <types.h>
 #include <lib.h>
 #include <thread.h>
 #include <test.h>
 #include <synch.h>
 
-/*
- * Called by the driver during initialization.
- */
+#define NUMQUADS 4
+
+// Signal entry and exit quadrants
+#define INQ 4
+#define OUTQ 5
+
+// Shared resource capacities
+#define INTERSECTION_SIMUL (NUMQUADS - 1)
+#define QUAD_SIMUL 1
+
+// Quadrant relative to entry direction
+#define FORW		(direction)
+#define TWO_FORW	( (direction + 3)%4 ) 
+#define TWO_FORW_LEFT	( (direction + 2)%4 )
+
+struct semaphore *intersection;
+struct semaphore *quads[NUMQUADS];
+
+void gonext(uint32_t index, uint32_t next, uint32_t prev); 
 
 void
 stoplight_init() {
+	// Called by the driver during initialization.
+
+	intersection = sem_create("isem", INTERSECTION_SIMUL);
+	for (int i = 0; i<NUMQUADS; ++i) {
+		quads[i] = sem_create("qsem", QUAD_SIMUL);
+	}
 	return;
 }
 
-/*
- * Called by the driver during teardown.
- */
-
 void stoplight_cleanup() {
+	// Called by the driver during teardown.
+
+	sem_destroy(intersection);
+	for (int i = 0; i<NUMQUADS; ++i) {
+		sem_destroy(quads[i]);
+	}
 	return;
+}
+
+
+void 
+gonext(uint32_t index, uint32_t nextquad, uint32_t prevquad)
+{
+	/* wait for access to next quad, 
+	 * move to next quad,
+	 * release prev quad.
+	 * prevquad = INQ on entry
+	 * nextquad = OUTQ on exit */
+
+	if (nextquad != OUTQ) {
+		P(quads[nextquad]);
+		inQuadrant(nextquad, index);
+	} else {
+		leaveIntersection(index);
+	}
+
+	if (prevquad != INQ)
+		V(quads[prevquad]);
 }
 
 void
 turnright(uint32_t direction, uint32_t index)
 {
-	(void)direction;
-	(void)index;
-	/*
-	 * Implement this function.
-	 */
+	P(intersection);
+	gonext(index, FORW, INQ);
+	gonext(index, OUTQ, FORW);
+	V(intersection);
 	return;
 }
+
 void
 gostraight(uint32_t direction, uint32_t index)
 {
-	(void)direction;
-	(void)index;
-	/*
-	 * Implement this function.
-	 */
+	P(intersection);
+	gonext(index, FORW, INQ);
+	gonext(index, TWO_FORW, FORW); 
+	gonext(index, OUTQ, TWO_FORW);
+	V(intersection);
 	return;
 }
+
 void
 turnleft(uint32_t direction, uint32_t index)
 {
-	(void)direction;
-	(void)index;
-	/*
-	 * Implement this function.
-	 */
+	P(intersection);
+	gonext(index, FORW, INQ);
+	gonext(index, TWO_FORW, FORW); 
+	gonext(index, TWO_FORW_LEFT, TWO_FORW);
+	gonext(index, OUTQ, TWO_FORW_LEFT);
+	V(intersection);
 	return;
 }
