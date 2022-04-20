@@ -411,7 +411,7 @@ done:
  * Driver code for the stoplight problem.
  */
 
-#define NCARS 64
+#define NCARS 1000
 #define NUM_QUADRANTS 4
 #define UNKNOWN_CAR -1
 #define PASSED_CAR -2

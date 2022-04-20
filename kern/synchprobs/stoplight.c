@@ -104,16 +104,11 @@ is therefore initialized to 3.
 #define TWO_FORW	( (direction + 3)%4 ) 
 #define TWO_FORW_LEFT	( (direction + 2)%4 )
 
-struct semaphore *intersection;
 struct semaphore *quads[NUMQUADS];
-
-void gonext(uint32_t index, uint32_t next, uint32_t prev); 
+int waits[4];
 
 void
 stoplight_init() {
-	// Called by the driver during initialization.
-
-	intersection = sem_create("isem", INTERSECTION_SIMUL);
 	for (int i = 0; i<NUMQUADS; ++i) {
 		quads[i] = sem_create("qsem", QUAD_SIMUL);
 	}
@@ -121,65 +116,83 @@ stoplight_init() {
 }
 
 void stoplight_cleanup() {
-	// Called by the driver during teardown.
-
-	sem_destroy(intersection);
 	for (int i = 0; i<NUMQUADS; ++i) {
 		sem_destroy(quads[i]);
+		waits[i] = 0;
 	}
 	return;
-}
-
-
-void 
-gonext(uint32_t index, uint32_t nextquad, uint32_t prevquad)
-{
-	/* wait for access to next quad, 
-	 * move to next quad,
-	 * release prev quad.
-	 * prevquad = INQ on entry
-	 * nextquad = OUTQ on exit */
-
-	if (nextquad != OUTQ) {
-		P(quads[nextquad]);
-		inQuadrant(nextquad, index);
-	} else {
-		leaveIntersection(index);
-	}
-
-	if (prevquad != INQ)
-		V(quads[prevquad]);
 }
 
 void
 turnright(uint32_t direction, uint32_t index)
 {
-	P(intersection);
-	gonext(index, FORW, INQ);
-	gonext(index, OUTQ, FORW);
-	V(intersection);
+	P(quads[FORW]);
+	inQuadrant(FORW, index);
+	leaveIntersection(index);
+	V(quads[FORW]);
 	return;
+}
+
+bool deadlocks(void);
+
+bool
+deadlocks(void)
+{
+	return (waits[0] && waits[1] && waits[2] && waits[3]) ;
 }
 
 void
 gostraight(uint32_t direction, uint32_t index)
 {
-	P(intersection);
-	gonext(index, FORW, INQ);
-	gonext(index, TWO_FORW, FORW); 
-	gonext(index, OUTQ, TWO_FORW);
-	V(intersection);
+	gstryagain:
+	P(quads[FORW]);
+	waits[TWO_FORW] += 1;
+	if ( deadlocks() ) {
+		waits[TWO_FORW] -= 1;
+		V(quads[FORW]);
+		thread_yield();
+		goto gstryagain;
+	}
+	inQuadrant(FORW, index);
+
+	P(quads[TWO_FORW]);
+	waits[TWO_FORW] -= 1;
+	inQuadrant(TWO_FORW, index);
+	V(quads[FORW]);
+
+	leaveIntersection(index);
+	V(quads[TWO_FORW]);
+
 	return;
 }
 
 void
 turnleft(uint32_t direction, uint32_t index)
 {
-	P(intersection);
-	gonext(index, FORW, INQ);
-	gonext(index, TWO_FORW, FORW); 
-	gonext(index, TWO_FORW_LEFT, TWO_FORW);
-	gonext(index, OUTQ, TWO_FORW_LEFT);
-	V(intersection);
+	tltryagain:
+	P(quads[FORW]);
+	waits[TWO_FORW] += 1;
+	if ( deadlocks() ) {
+		waits[TWO_FORW] -= 1;
+		V(quads[FORW]);
+		thread_yield();
+		goto tltryagain;
+	}
+	inQuadrant(FORW, index);
+
+	P(quads[TWO_FORW]);
+	waits[TWO_FORW] -= 1;
+	waits[TWO_FORW_LEFT] += 1;
+	inQuadrant(TWO_FORW, index);
+	V(quads[FORW]);
+
+	P(quads[TWO_FORW_LEFT]);
+	waits[TWO_FORW_LEFT] -= 1;
+	inQuadrant(TWO_FORW_LEFT, index);
+	V(quads[TWO_FORW]);
+
+	leaveIntersection(index);
+	V(quads[TWO_FORW_LEFT]);
+
 	return;
 }
