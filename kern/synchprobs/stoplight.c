@@ -64,24 +64,34 @@
  */
 
  /*	vecf:
-The approach is simple yet effective:
+This version gives full parallel access to the intersection by checking
+for cycles upon entry and pre-empting access if deadlock is detected.
 
-Each car needs access to a quadrant via a semaphore before accessing it.
-Since only one car is allowed in a quadrant at once, this semaphore's value
-is one. This avoids collisions.
+The following experimental results were obtained by comparing with the
+simple approach:
 
-To keep things simple, we only let the cars move in conventional ways.
-Per thread, this limits gostraight, turnleft and turnright to acquire the 
-quadrant semaphores in the same predefined order every time.
+algo 	direc	turns	cars	result
+______________________________________________
+simple	0|2	0	2000	365.39
+full	0|2	0	2000	365.11
+full	rand	rand	2000	405.74
+simple	rand	rand	2000	367.93
+full	rand	rand	1000	187.64
+simple	rand	rand	1000	181.54
 
-To avoid deadlocks, the intersection capacity is controlled via a semaphore.
-Given the limited ways in which the cars can move, the intersection can only
-deadlock when there are four cars in it at once. The intersection semaphore
-is therefore initialized to 3.
+Discussion:
+The simple algorithm fairs better most of the time. Addionally, the code is 
+much simpler to write and read and about a third of the time to implement 
+compared to modifying the existing code into a full parallel implementation.
+
+The parallel algorithm does only negligbly better for 2000 cars flowing across.
+Full parallel is expected to do even better on larger workflows with only
+cross flowing traffic, however, this situation seems unlikely in any real 
+world application.
+
+In conclusion, this seems to be a case of Hill's Law:
+	SIMPLE AND DUMB CAN BE BETTER!!!
 */
-
-
-
 
 #include <types.h>
 #include <lib.h>
