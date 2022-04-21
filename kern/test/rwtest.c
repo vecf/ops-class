@@ -47,6 +47,7 @@ int rwtest(int nargs, char **args) {
 
 	kprintf_n("rwt1 - test create rwlock\n");
 	kprintf_n("rwlock->name: %s\n", rwlk->rwlock_name);
+	rwlock_destroy(rwlk);
 
 	success(TEST161_SUCCESS, SECRET, "rwt1");
 
