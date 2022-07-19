@@ -319,7 +319,8 @@ locktest2(int nargs, char **args) {
 	}
 
 	secprintf(SECRET, "Should panic...", "lt2");
-	lock_release(testlock);
+	//vecf: lock released but not held. Should panic.
+	lock_release(testlock); 
 
 	/* Should not get here on success. */
 
@@ -364,16 +365,37 @@ locktest3(int nargs, char **args) {
  * the driver completes.
  */
 
+#include <current.h>
+
 static
 void
 locktestacquirer(void * junk, unsigned long num)
 {
-  (void)junk;
+	(void)junk;
 	(void)num;
 
-  lock_acquire(testlock);
-  V(donesem);
+	lock_acquire(testlock); 
+	/*	vecf:
+	Analysis of `testlock` variable wrt K&R88 A.11.2:
+	  
+	Since `testlock` has external scope (not a function local variable),
+	ie it is shared by all functions in this file (translation unit).
+	Since it's marked static and has external scope, its linkeage is internal:
+	it is not visible to other translations units in within the same program.
 
+	Informally, it is private (only visible in this file) and 
+	global (visible and shared by all scopes in this file).
+	*/
+	kprintf_n("thread: %s, about to increase semaphore.\n",curthread->t_name);
+	V(donesem); 
+	/*	vecf: 
+	-locktest4 and 5:
+	'parent' thread releases lock, but it is held by this thread.
+	Once this function returns, this thread gets cleaned up and no other 
+	thread in the system will be able to release the lock without raising an
+	exception.
+	  */
+	kprintf_n("thread: %s, about to return.\n",curthread->t_name);
 	return;
 }
 
@@ -400,13 +422,41 @@ locktest4(int nargs, char **args) {
   }
 
 	result = thread_fork("lt4", NULL, locktestacquirer, NULL, 0);
+	/*	vecf: 
+
+		thread_fork(name,process,func,arg1,arg2) 
+
+	-create new thread called "lt4" 
+	-since process=NULL, create thread in process inherited from caller
+	-start execution in func(arg1,arg2) 
+
+	Question: 
+	We know thread_fork returns 0 upon success and a different number
+	otherwise, but where does locktestacquirer() return to once done?
+	We'll first need to learn more about threads: once the entrypoint
+	function returns, thread_exit() is called which turns the thread
+	into a zombie and eventually gets it cleaned up the kernel. This
+	is very different from the control flow of traditional fork.
+	*/
+	
 	if (result) {
 		panic("lt4: thread_fork failed: %s\n", strerror(result));
 	}
 
-	P(donesem);
+	/*	vecf: 
+	Original thread blocks here waiting for new thread to increase the
+	semaphore.
+	*/
+	P(donesem); 
+
 	secprintf(SECRET, "Should panic...", "lt4");
-	lock_release(testlock);
+	/*	vecf: 
+	Lock released from 'parent' thread, but 
+	held by newly created thread. The new thread returns and gets cleaned
+	up and along with it goes the ability to release the lock.
+	*/
+	kprintf_n("thread: %s, about to release lock.\n",curthread->t_name);
+	lock_release(testlock); 
 
   /* Should not get here on success. */
 
@@ -447,7 +497,9 @@ locktest5(int nargs, char **args) {
 
 	P(donesem);
 	secprintf(SECRET, "Should panic...", "lt5");
-	KASSERT(lock_do_i_hold(testlock));
+	kprintf_n("thread: %s, about to assert.\n",curthread->t_name);
+	//vecf: lock not held by this thread.
+	KASSERT(lock_do_i_hold(testlock)); 
 
   /* Should not get here on success. */
 
@@ -477,7 +529,11 @@ cvtestthread(void *junk, unsigned long num)
 			testval2 = 0;
 			random_yielder(4);
 			gettime(&ts1);
-			cv_wait(testcv, testlock);
+			/*	vecf: 
+			go to sleep waiting on testcv.
+			when woken up, must hold testlock
+			*/
+			cv_wait(testcv, testlock); 
 			gettime(&ts2);
 			random_yielder(4);
 
@@ -504,15 +560,24 @@ cvtestthread(void *junk, unsigned long num)
 		for (j=0; j<3000; j++);
 
 		random_yielder(4);
+		/*	vecf:
+		notify all other threads waiting on testcv.
+		*/
 		cv_broadcast(testcv, testlock);
 		random_yielder(4);
 		failif((testval1 != testval2));
 
 		kprintf_n("Thread %lu\n", testval2);
 		testval1 = (testval1 + NTHREADS - 1) % NTHREADS;
+		/*	vecf:
+		release testlock
+		*/
 		lock_release(testlock);
 	}
-	V(donesem);
+	/*	vecf:
+	Allow another thread to run the test?
+	*/
+	V(donesem); 
 }
 
 int
@@ -525,6 +590,10 @@ cvtest(int nargs, char **args)
 
 	kprintf_n("Starting cvt1...\n");
 	for (i=0; i<CREATELOOPS; i++) {
+		/*	vecf:
+		create a lock, cv and semaphore multiple times.
+		destroy them, except on the last iteration.
+		*/
 		kprintf_t(".");
 		testlock = lock_create("testlock");
 		if (testlock == NULL) {
@@ -549,6 +618,10 @@ cvtest(int nargs, char **args)
 
 	testval1 = NTHREADS-1;
 	for (i=0; i<NTHREADS; i++) {
+		/*	vecf:
+		set testval1 to NTHREADS - 1
+		create NTHREADS running cvtestthread.
+		*/
 		kprintf_t(".");
 		result = thread_fork("cvt1", NULL, cvtestthread, NULL, (long unsigned) i);
 		if (result) {
@@ -557,6 +630,9 @@ cvtest(int nargs, char **args)
 	}
 	for (i=0; i<NTHREADS; i++) {
 		kprintf_t(".");
+		/*	vecf:
+		All created threads wait on donesem to start running.
+		*/
 		P(donesem);
 	}
 

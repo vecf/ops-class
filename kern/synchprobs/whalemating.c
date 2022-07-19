@@ -43,8 +43,16 @@
 /*
  * Called by the driver during initialization.
  */
+struct semaphore *female_wait;
+struct semaphore *female_go;
+struct semaphore *male_wait;
+struct semaphore *male_go;
 
 void whalemating_init() {
+	female_wait = sem_create("fw",0);
+	female_go = sem_create("fg",0);
+	male_wait = sem_create("mw",0);
+	male_go = sem_create("mg",0);
 	return;
 }
 
@@ -54,38 +62,45 @@ void whalemating_init() {
 
 void
 whalemating_cleanup() {
+	sem_destroy(female_wait);
+	sem_destroy(female_go);
+	sem_destroy(male_wait);
+	sem_destroy(male_go);
 	return;
 }
 
 void
 male(uint32_t index)
 {
-	(void)index;
 	/*
 	 * Implement this function by calling male_start and male_end when
 	 * appropriate.
 	 */
+	male_start(index);
+	V(male_wait);
+	P(male_go);
+	male_end(index);
 	return;
 }
 
 void
 female(uint32_t index)
 {
-	(void)index;
-	/*
-	 * Implement this function by calling female_start and female_end when
-	 * appropriate.
-	 */
+	female_start(index);
+	V(female_wait);
+	P(female_go);
+	female_end(index);
 	return;
 }
 
 void
 matchmaker(uint32_t index)
 {
-	(void)index;
-	/*
-	 * Implement this function by calling matchmaker_start and matchmaker_end
-	 * when appropriate.
-	 */
+	matchmaker_start(index);
+	P(female_wait);
+	P(male_wait);
+	V(female_go);
+	V(male_go);
+	matchmaker_end(index);
 	return;
 }
